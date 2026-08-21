@@ -40,9 +40,10 @@
     position:relative;background:
       repeating-conic-gradient(#0f1418 0% 25%, #121820 0% 50%) 50%/16px 16px;
     display:flex;align-items:center;justify-content:center;
-    min-height:44vh;padding:14px;
+    height:56vh;padding:14px;
   }
-  canvas{max-width:100%;max-height:62vh;display:block;cursor:crosshair;
+  /* Size is driven from JS so the drawing buffer matches the pixels on screen. */
+  canvas{display:block;cursor:crosshair;
     box-shadow:0 0 0 1px var(--etch),0 18px 50px -20px #000}
   #drop{
     position:absolute;inset:14px;border:1px dashed var(--etch);
@@ -104,13 +105,13 @@
   .actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:16px}
   #status{margin-top:10px;font-size:10px;letter-spacing:.12em;text-transform:uppercase;color:var(--dim);min-height:14px}
   #status.warn{color:var(--coat-a)}
+  #meta{margin-top:14px;font-size:10px;letter-spacing:.12em;text-transform:uppercase;color:var(--dim);min-height:14px}
   input[type=file]{display:none}
 
   @media(min-width:900px){
     .wrap{flex-direction:row;height:100vh}
     .left{flex:1;display:flex;flex-direction:column;min-width:0}
-    .stage{flex:1;min-height:0}
-    canvas{max-height:calc(100vh - 90px)}
+    .stage{flex:1;height:auto;min-height:0}
     .panel{width:340px;border-top:0;border-left:1px solid var(--etch);overflow-y:auto;padding-bottom:24px}
   }
 </style>
@@ -148,7 +149,7 @@
       <div class="row"><label for="focus">Plane</label><input type="range" id="focus" min="0" max="1" step="0.005" value="1"><output for="focus">1.00</output></div>
       <div class="row"><label for="spread">Spread</label><input type="range" id="spread" min="0" max="1" step="0.01" value="0.42"><output for="spread">0.42</output></div>
       <div class="row"><label for="aperture">Aperture</label><input type="range" id="aperture" min="0" max="60" step="1" value="22"><output for="aperture">22</output></div>
-      <div class="row"><label for="edge">Edge soft</label><input type="range" id="edge" min="0" max="1" step="0.01" value="0.14"><output for="edge">0.14</output></div>
+      <div class="row"><label for="edge">Edge soft</label><input type="range" id="edge" min="0" max="1" step="0.01" value="0"><output for="edge">0.00</output></div>
     </div>
 
     <div class="group">
@@ -159,11 +160,11 @@
 
     <div class="group">
       <div class="glabel"><span>Glass and sensor</span></div>
-      <div class="row"><label for="ca">Fringing</label><input type="range" id="ca" min="0" max="3" step="0.05" value="0.7"><output for="ca">0.70</output></div>
-      <div class="row"><label for="dist">Barrel</label><input type="range" id="dist" min="-0.15" max="0.15" step="0.005" value="0.02"><output for="dist">0.02</output></div>
-      <div class="row"><label for="vig">Vignette</label><input type="range" id="vig" min="0" max="1" step="0.01" value="0.28"><output for="vig">0.28</output></div>
-      <div class="row"><label for="grain">Grain</label><input type="range" id="grain" min="0" max="0.2" step="0.002" value="0.04"><output for="grain">0.040</output></div>
-      <div class="row"><label for="lift">Lifted blacks</label><input type="range" id="lift" min="0" max="0.3" step="0.005" value="0.06"><output for="lift">0.06</output></div>
+      <div class="row"><label for="ca">Fringing</label><input type="range" id="ca" min="0" max="3" step="0.05" value="0"><output for="ca">0.00</output></div>
+      <div class="row"><label for="dist">Barrel</label><input type="range" id="dist" min="-0.15" max="0.15" step="0.005" value="0"><output for="dist">0.00</output></div>
+      <div class="row"><label for="vig">Vignette</label><input type="range" id="vig" min="0" max="1" step="0.01" value="0.16"><output for="vig">0.16</output></div>
+      <div class="row"><label for="grain">Grain</label><input type="range" id="grain" min="0" max="0.2" step="0.002" value="0.008"><output for="grain">0.008</output></div>
+      <div class="row"><label for="lift">Lifted blacks</label><input type="range" id="lift" min="0" max="0.3" step="0.005" value="0"><output for="lift">0.00</output></div>
     </div>
 
     <div class="actions">
@@ -172,6 +173,7 @@
       <button class="btn" id="save" disabled>Save PNG</button>
       <button class="btn" id="pick2">Change picture</button>
     </div>
+    <div id="meta"></div>
   </div>
 </div>
 
@@ -180,23 +182,37 @@
 <script>
 /* ------------------------------------------------------------------ *
  * FOCAL — depth-driven disc bokeh + lens/sensor imperfections, WebGL2 *
+ *                                                                    *
+ * The picture is kept at full resolution end to end. The preview is   *
+ * rendered at the size it is actually shown at, so the browser never  *
+ * has to squash a huge drawing buffer down to the screen, and Save    *
+ * re-renders the whole thing at native size.                          *
  * ------------------------------------------------------------------ */
 
 const $ = s => document.querySelector(s);
 const canvas = $('#gl');
-const gl = canvas.getContext('webgl2', {preserveDrawingBuffer:true, antialias:false, premultipliedAlpha:false});
+const stage  = $('#stage');
 const statusEl = $('#status');
+const metaEl = $('#meta');
+
+const gl = canvas.getContext('webgl2', {
+  preserveDrawingBuffer:true, antialias:false, premultipliedAlpha:false, alpha:false
+});
 
 if(!gl){ statusEl.textContent = 'This browser has no WebGL2. Try Chrome, Safari 15+, or Firefox.'; statusEl.className='warn'; }
 
-const MAX_SIDE = 2200;
-let img = null;             // HTMLImageElement (already downscaled to a canvas)
-let imgCanvas = null;       // source pixels
-let depthCanvas = null;     // greyscale depth, same size
+let MAX_SIDE = 3400;        // native pixels kept for the picture itself
+const DEPTH_MAX = 1024;     // depth is low frequency; no need to hold it at full size
+const MAX_DPR = 2;
+
+let img = null;             // decoded source
+let imgCanvas = null;       // source pixels at working resolution
+let depthCanvas = null;     // greyscale depth
 let autoDepthCanvas = null; // cached AI depth for the current picture
 let mode = 'radial';
 let focusPt = {x:0.5, y:0.5};
 let showDepth = false;
+let hdr = false;            // float render target available
 
 /* ---------------------------- shaders ---------------------------- */
 
@@ -204,17 +220,12 @@ const VS = `#version 300 es
 in vec2 aPos; out vec2 vUv;
 void main(){ vUv = aPos*0.5+0.5; gl_Position = vec4(aPos,0.0,1.0); }`;
 
-const FS_BOKEH = `#version 300 es
-precision highp float;
-uniform sampler2D uImg, uDepth;
-uniform vec2 uRes;
-uniform float uFocus, uSpread, uMaxCoC, uEdge, uHiThresh, uHiBoost;
-in vec2 vUv; out vec4 outColor;
-
-const int N = 96;
-
+/* Shared circle-of-confusion model. uMaxCoC is in the pixels of whichever
+   pass is running, so the same code works at full and at half resolution. */
+const COC = `
+uniform sampler2D uDepth;
+uniform float uFocus, uSpread, uMaxCoC, uEdge;
 float depthAt(vec2 uv){ return texture(uDepth, uv).r; }
-
 float cocAt(vec2 uv){
   float d = depthAt(uv);
   float s = max(uSpread, 0.001);
@@ -222,22 +233,41 @@ float cocAt(vec2 uv){
   vec2 p = (uv - 0.5) * 2.0;
   c += pow(clamp(length(p) / 1.4142, 0.0, 1.0), 2.2) * uEdge * 2.0;
   return clamp(c, 0.0, 1.0) * uMaxCoC;
-}
+}`;
+
+/* Pass 1 — gather the defocus disc. Runs in linear light (the source is an
+   sRGB texture, so the sampler hands us linear values) and writes to a float
+   target, so blown highlights keep their energy instead of clipping at 1.0.
+   Alpha carries "how much nearer, blurred stuff spills onto this pixel",
+   which lets the composite keep foreground bokeh over sharp background. */
+const FS_BOKEH = `#version 300 es
+precision highp float;
+uniform sampler2D uImg;
+uniform vec2 uRes;
+uniform float uHiThresh, uHiBoost, uPx, uLod;
+uniform int uSamples;
+in vec2 vUv; out vec4 outColor;
+${COC}
+
+const int MAXN = 256;
 
 void main(){
+  vec3 base = textureLod(uImg, vUv, uLod).rgb;
+  if(uMaxCoC < 0.5){ outColor = vec4(base, 0.0); return; }
+
   float centreCoC = cocAt(vUv);
   float centreD   = depthAt(vUv);
 
-  if(uMaxCoC < 0.5){ outColor = vec4(texture(uImg, vUv).rgb, 1.0); return; }
-
   vec3 sum = vec3(0.0);
-  float wsum = 0.0;
+  float wsum = 0.0, fgsum = 0.0;
   float golden = 2.399963229728653;
   float jitter = fract(sin(dot(vUv, vec2(12.9898,78.233))) * 43758.5453) * 6.2831;
+  float n = float(uSamples);
 
-  for(int i = 0; i < N; i++){
+  for(int i = 0; i < MAXN; i++){
+    if(i >= uSamples) break;
     float fi = float(i) + 0.5;
-    float r  = sqrt(fi / float(N));
+    float r  = sqrt(fi / n);
     float a  = fi * golden + jitter;
     vec2 off = vec2(cos(a), sin(a)) * r * uMaxCoC;
     vec2 suv = clamp(vUv + off / uRes, vec2(0.0), vec2(1.0));
@@ -255,54 +285,90 @@ void main(){
     }
     if(w <= 0.0) continue;
 
-    vec3 c = texture(uImg, suv).rgb;
+    vec3 c = textureLod(uImg, suv, uLod).rgb;
     float lum = dot(c, vec3(0.2126, 0.7152, 0.0722));
     // highlights only bloom where there is actually defocus to bloom into
-    float bloomable = clamp(sCoC / 3.0, 0.0, 1.0);
+    float bloomable = clamp(sCoC / max(3.0 * uPx, 0.001), 0.0, 1.0);
     c *= 1.0 + max(0.0, lum - uHiThresh) * uHiBoost * bloomable;
 
     sum += c * w;
     wsum += w;
+    fgsum += w * ((sD > centreD + 0.02 && sCoC > 1.5 * uPx) ? 1.0 : 0.0);
   }
 
-  vec3 col = wsum > 0.0 ? sum / wsum : texture(uImg, vUv).rgb;
-  outColor = vec4(min(col, vec3(1.0)), 1.0);
+  vec3 col = wsum > 0.0 ? sum / wsum : base;
+  float fg = wsum > 0.0 ? clamp(fgsum / wsum * 1.6, 0.0, 1.0) : 0.0;
+  outColor = vec4(col, fg);
 }`;
 
+/* Pass 2 — composite sharp against blurred, then glass and sensor.
+   Anything whose circle of confusion is under a pixel comes straight from the
+   source texture untouched, so in-focus detail survives the round trip. */
 const FS_FINISH = `#version 300 es
 precision highp float;
-uniform sampler2D uTex;
+uniform sampler2D uImg, uBlur;
 uniform vec2 uRes;
 uniform float uCA, uDist, uVig, uGrain, uLift, uSeed;
 in vec2 vUv; out vec4 outColor;
+${COC}
 
 float hash(vec2 p){ return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+
+vec3 resolve(vec2 uv){
+  vec4 b = texture(uBlur, uv);
+  float m = max(smoothstep(0.6, 1.6, cocAt(uv)), b.a);
+  if(m <= 0.0) return texture(uImg, uv).rgb;
+  return mix(texture(uImg, uv).rgb, b.rgb, m);
+}
+
+vec3 encodeSRGB(vec3 c){
+  c = clamp(c, 0.0, 1.0);
+  return mix(c * 12.92, 1.055 * pow(c, vec3(1.0/2.4)) - 0.055, step(vec3(0.0031308), c));
+}
 
 void main(){
   vec2 p = vUv - 0.5;
   vec2 duv = vUv + p * dot(p, p) * uDist;
 
-  float k = uCA * 0.0035;
-  float r = texture(uTex, 0.5 + (duv - 0.5) * (1.0 + k)).r;
-  float g = texture(uTex, duv).g;
-  float b = texture(uTex, 0.5 + (duv - 0.5) * (1.0 - k)).b;
-  vec3 col = vec3(r, g, b);
+  vec3 col;
+  if(uCA > 0.001){
+    float k = uCA * 0.0035;
+    col = vec3(
+      resolve(0.5 + (duv - 0.5) * (1.0 + k)).r,
+      resolve(duv).g,
+      resolve(0.5 + (duv - 0.5) * (1.0 - k)).b);
+  }else{
+    col = resolve(duv);
+  }
 
   float v = 1.0 - uVig * pow(clamp(length(p) * 1.42, 0.0, 1.0), 2.2);
   col *= v;
 
+  col = encodeSRGB(col);
   col = col * (1.0 - uLift) + uLift * vec3(0.030, 0.034, 0.045);
 
   float lum = dot(col, vec3(0.2126, 0.7152, 0.0722));
-  float n = hash(vUv * uRes + uSeed) - 0.5;
-  col += n * uGrain * (1.0 - lum * 0.65);
+  col += (hash(vUv * uRes + uSeed) - 0.5) * uGrain * (1.0 - lum * 0.65);
+
+  // sub-LSB dither: kills the banding that smooth bokeh and vignette
+  // otherwise show once they are quantised to 8 bits
+  col += (hash(vUv * uRes + uSeed + 91.7) - 0.5) / 255.0;
 
   outColor = vec4(clamp(col, 0.0, 1.0), 1.0);
 }`;
 
+const FS_DEPTH = `#version 300 es
+precision highp float;
+uniform sampler2D uDepth;
+in vec2 vUv; out vec4 outColor;
+void main(){ outColor = vec4(vec3(texture(uDepth, vUv).r), 1.0); }`;
+
 /* ---------------------------- gl plumbing ---------------------------- */
 
-let progBokeh, progFinish, vao, fbo, fboTex, texImg, texDepth;
+let progBokeh, progFinish, progDepth, vao, fbo, texBlur, texImg, texDepth;
+let blurW = 0, blurH = 0;
+let viewW = 0, viewH = 0;                 // resolution currently held in texImg
+let viewCache = null, viewCacheW = 0, viewCacheH = 0;
 
 function compile(type, src){
   const s = gl.createShader(type);
@@ -319,19 +385,24 @@ function link(vs, fs){
   if(!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(p));
   return p;
 }
-function makeTex(){
+function makeTex(min){
   const t = gl.createTexture();
   gl.bindTexture(gl.TEXTURE_2D, t);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, min || gl.LINEAR);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
   return t;
 }
 
 function initGL(){
+  hdr = !!(gl.getExtension('EXT_color_buffer_float') || gl.getExtension('EXT_color_buffer_half_float'));
+  MAX_SIDE = Math.min(MAX_SIDE, gl.getParameter(gl.MAX_TEXTURE_SIZE));
+
   progBokeh  = link(VS, FS_BOKEH);
   progFinish = link(VS, FS_FINISH);
+  progDepth  = link(VS, FS_DEPTH);
+
   vao = gl.createVertexArray();
   gl.bindVertexArray(vao);
   const buf = gl.createBuffer();
@@ -339,39 +410,89 @@ function initGL(){
   gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 3,-1, -1,3]), gl.STATIC_DRAW);
   gl.enableVertexAttribArray(0);
   gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
-  texImg = makeTex(); texDepth = makeTex(); fboTex = makeTex();
+
+  // the source is mipmapped so that reduced-size passes prefilter instead of
+  // point-sampling a much bigger picture, which is what made the preview crawl
+  texImg   = makeTex(gl.LINEAR_MIPMAP_LINEAR);
+  texDepth = makeTex();
+  texBlur  = makeTex();
   fbo = gl.createFramebuffer();
 }
 if(gl) initGL();
 
 function u(p, n){ return gl.getUniformLocation(p, n); }
 
+// Feed the shaders a source that is already at the resolution being drawn.
+// Letting the GPU minify a 3400px texture with trilinear mips costs real
+// detail, and letting the compositor minify the drawing buffer costs more
+// than that — it aliases. A proper box-filtered resample beats both.
+function useSourceAt(w, h){
+  if(!imgCanvas) return;
+  const full = (w >= imgCanvas.width || h >= imgCanvas.height);
+  const tw = full ? imgCanvas.width  : Math.max(1, w);
+  const th = full ? imgCanvas.height : Math.max(1, h);
+  if(viewW === tw && viewH === th) return;
+
+  let c;
+  if(full) c = imgCanvas;
+  else if(viewCache && viewCacheW === tw && viewCacheH === th) c = viewCache;
+  else { c = fitToCanvas(imgCanvas, tw, th); viewCache = c; viewCacheW = tw; viewCacheH = th; }
+
+  gl.bindTexture(gl.TEXTURE_2D, texImg);
+  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+  // sRGB internal format: the sampler decodes to linear for us, so filtering
+  // and the whole blur happen in light rather than in gamma-coded values
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.SRGB8_ALPHA8, gl.RGBA, gl.UNSIGNED_BYTE, c);
+  gl.generateMipmap(gl.TEXTURE_2D);
+  viewW = tw; viewH = th;
+}
+
+function ensureBlurTarget(w, h){
+  if(w === blurW && h === blurH) return;
+  blurW = w; blurH = h;
+  gl.bindTexture(gl.TEXTURE_2D, texBlur);
+  if(hdr) gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA16F, w, h, 0, gl.RGBA, gl.HALF_FLOAT, null);
+  else    gl.texImage2D(gl.TEXTURE_2D, 0, gl.SRGB8_ALPHA8, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+}
+
 /* ---------------------------- depth maps ---------------------------- */
 
+function depthDims(){
+  const w = imgCanvas.width, h = imgCanvas.height;
+  const s = Math.min(1, DEPTH_MAX / Math.max(w, h));
+  return [Math.max(1, Math.round(w * s)), Math.max(1, Math.round(h * s))];
+}
+
 function ensureDepthCanvas(w, h){
-  if(!depthCanvas){ depthCanvas = document.createElement('canvas'); }
+  if(!depthCanvas) depthCanvas = document.createElement('canvas');
   if(depthCanvas.width !== w || depthCanvas.height !== h){
     depthCanvas.width = w; depthCanvas.height = h;
   }
-  return depthCanvas.getContext('2d');
+  const ctx = depthCanvas.getContext('2d', {willReadFrequently:true});
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = 'high';
+  return ctx;
 }
 
-// Subject: white at the focus point, falling off outwards. Sharp middle, soft everything else.
+// Subject: a flat, genuinely sharp core around the focus point, then falling
+// off outwards. Without the flat part nothing in the frame is ever fully sharp,
+// which reads as the whole picture having gone soft.
 function buildRadialDepth(){
-  const w = imgCanvas.width, h = imgCanvas.height;
+  const [w, h] = depthDims();
   const ctx = ensureDepthCanvas(w, h);
   const cx = focusPt.x * w, cy = focusPt.y * h;
   const rad = Math.hypot(w, h) * 0.62;
   const g = ctx.createRadialGradient(cx, cy, 0, cx, cy, rad);
   g.addColorStop(0, '#fff');
-  g.addColorStop(0.32, '#dcdcdc');
+  g.addColorStop(0.22, '#fff');
+  g.addColorStop(0.45, '#d8d8d8');
   g.addColorStop(1, '#000');
   ctx.fillStyle = g; ctx.fillRect(0, 0, w, h);
 }
 
 // Ground: a receding plane. Near the bottom of the frame is close, the top is far.
 function buildGroundDepth(){
-  const w = imgCanvas.width, h = imgCanvas.height;
+  const [w, h] = depthDims();
   const ctx = ensureDepthCanvas(w, h);
   const g = ctx.createLinearGradient(0, h, 0, 0);
   g.addColorStop(0, '#fff');
@@ -380,13 +501,14 @@ function buildGroundDepth(){
 }
 
 function useAutoDepth(){
-  const w = imgCanvas.width, h = imgCanvas.height;
+  const [w, h] = depthDims();
   const ctx = ensureDepthCanvas(w, h);
+  ctx.clearRect(0, 0, w, h);
   ctx.drawImage(autoDepthCanvas, 0, 0, w, h);
 }
 
 function rebuildDepth(){
-  if(!imgCanvas) return;
+  if(!imgCanvas || !gl) return;
   if(mode === 'ground') buildGroundDepth();
   else if(mode === 'auto' && autoDepthCanvas) useAutoDepth();
   else buildRadialDepth();
@@ -398,7 +520,7 @@ function rebuildDepth(){
 
 function depthValueAt(nx, ny){
   if(!depthCanvas) return 1;
-  const ctx = depthCanvas.getContext('2d');
+  const ctx = depthCanvas.getContext('2d', {willReadFrequently:true});
   const x = Math.max(0, Math.min(depthCanvas.width - 1, Math.round(nx * depthCanvas.width)));
   const y = Math.max(0, Math.min(depthCanvas.height - 1, Math.round(ny * depthCanvas.height)));
   return ctx.getImageData(x, y, 1, 1).data[0] / 255;
@@ -406,61 +528,85 @@ function depthValueAt(nx, ny){
 
 /* ---------------------------- render ---------------------------- */
 
-let raf = 0;
+let raf = 0, hqTimer = 0;
+
 function render(){
   if(!imgCanvas || !gl) return;
   cancelAnimationFrame(raf);
-  raf = requestAnimationFrame(draw);
+  raf = requestAnimationFrame(() => drawScene(canvas.width, canvas.height, false));
+  // settle on the full sample count once the slider stops moving
+  clearTimeout(hqTimer);
+  hqTimer = setTimeout(() => drawScene(canvas.width, canvas.height, true), 140);
 }
 
 function val(id){ return parseFloat($('#' + id).value); }
 
-function draw(){
-  const w = canvas.width, h = canvas.height;
+function drawScene(w, h, quality){
+  if(!imgCanvas || !gl || w < 1 || h < 1) return;
   gl.bindVertexArray(vao);
+  useSourceAt(w, h);
 
   if(showDepth){
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     gl.viewport(0, 0, w, h);
-    gl.useProgram(progBokeh);
+    gl.useProgram(progDepth);
     gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, texDepth);
-    gl.uniform1i(u(progBokeh, 'uImg'), 0);
-    gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, texDepth);
-    gl.uniform1i(u(progBokeh, 'uDepth'), 1);
-    gl.uniform2f(u(progBokeh, 'uRes'), w, h);
-    gl.uniform1f(u(progBokeh, 'uMaxCoC'), 0.0);
+    gl.uniform1i(u(progDepth, 'uDepth'), 0);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
     return;
   }
 
-  // pass 1 — bokeh into the framebuffer
-  gl.bindTexture(gl.TEXTURE_2D, fboTex);
-  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+  const ref    = Math.max(w, h) / 1600;        // output pixels per "reference" pixel
+  const maxCoC = val('aperture') * ref;        // disc radius in output pixels
+  const scale  = maxCoC > 6 ? 0.5 : 1.0;       // big blur is low frequency — gather it at half res
+  const bw = Math.max(1, Math.round(w * scale));
+  const bh = Math.max(1, Math.round(h * scale));
+  const cocPass = maxCoC * scale;
+
+  // enough samples that the disc is covered rather than dithered
+  const cap = quality ? 256 : 64;
+  const n = Math.max(12, Math.min(cap, Math.ceil(Math.PI * cocPass * cocPass / 2.0)));
+  const lod = Math.max(0, Math.log2(Math.max(1, viewW / bw)));
+
+  ensureBlurTarget(bw, bh);
+
+  // pass 1 — bokeh, in linear light, into a float target
   gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
-  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, fboTex, 0);
-  gl.viewport(0, 0, w, h);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texBlur, 0);
+  gl.viewport(0, 0, bw, bh);
 
   gl.useProgram(progBokeh);
   gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, texImg);
   gl.uniform1i(u(progBokeh, 'uImg'), 0);
   gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, texDepth);
   gl.uniform1i(u(progBokeh, 'uDepth'), 1);
-  gl.uniform2f(u(progBokeh, 'uRes'), w, h);
+  gl.uniform2f(u(progBokeh, 'uRes'), bw, bh);
   gl.uniform1f(u(progBokeh, 'uFocus'), val('focus'));
   gl.uniform1f(u(progBokeh, 'uSpread'), val('spread'));
-  gl.uniform1f(u(progBokeh, 'uMaxCoC'), val('aperture') * (Math.max(w, h) / 1600));
+  gl.uniform1f(u(progBokeh, 'uMaxCoC'), cocPass);
   gl.uniform1f(u(progBokeh, 'uEdge'), val('edge'));
-  gl.uniform1f(u(progBokeh, 'uHiThresh'), val('hthresh'));
+  gl.uniform1f(u(progBokeh, 'uHiThresh'), Math.pow(val('hthresh'), 2.2)); // slider is in display terms
   gl.uniform1f(u(progBokeh, 'uHiBoost'), val('hboost'));
+  gl.uniform1f(u(progBokeh, 'uPx'), Math.max(ref * scale, 0.001));
+  gl.uniform1f(u(progBokeh, 'uLod'), lod);
+  gl.uniform1i(u(progBokeh, 'uSamples'), n);
   gl.drawArrays(gl.TRIANGLES, 0, 3);
 
-  // pass 2 — glass and sensor, to the screen
+  // pass 2 — composite against the untouched source, then glass and sensor
   gl.bindFramebuffer(gl.FRAMEBUFFER, null);
   gl.viewport(0, 0, w, h);
   gl.useProgram(progFinish);
-  gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, fboTex);
-  gl.uniform1i(u(progFinish, 'uTex'), 0);
+  gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, texImg);
+  gl.uniform1i(u(progFinish, 'uImg'), 0);
+  gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, texDepth);
+  gl.uniform1i(u(progFinish, 'uDepth'), 1);
+  gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_2D, texBlur);
+  gl.uniform1i(u(progFinish, 'uBlur'), 2);
   gl.uniform2f(u(progFinish, 'uRes'), w, h);
+  gl.uniform1f(u(progFinish, 'uFocus'), val('focus'));
+  gl.uniform1f(u(progFinish, 'uSpread'), val('spread'));
+  gl.uniform1f(u(progFinish, 'uMaxCoC'), maxCoC);
+  gl.uniform1f(u(progFinish, 'uEdge'), val('edge'));
   gl.uniform1f(u(progFinish, 'uCA'), val('ca'));
   gl.uniform1f(u(progFinish, 'uDist'), val('dist'));
   gl.uniform1f(u(progFinish, 'uVig'), val('vig'));
@@ -470,36 +616,106 @@ function draw(){
   gl.drawArrays(gl.TRIANGLES, 0, 3);
 }
 
+/* ---------------------------- layout ---------------------------- */
+
+// Draw at the size the canvas is actually displayed at. Handing the compositor
+// a 3400px buffer to squeeze into a 700px box is what made the preview mushy.
+function layout(){
+  if(!imgCanvas) return;
+  const availW = Math.max(64, stage.clientWidth  - 28);
+  const availH = Math.max(64, stage.clientHeight - 28);
+  const fit = Math.min(availW / imgCanvas.width, availH / imgCanvas.height, 1);
+  const cssW = Math.max(1, Math.round(imgCanvas.width  * fit));
+  const cssH = Math.max(1, Math.round(imgCanvas.height * fit));
+  canvas.style.width  = cssW + 'px';
+  canvas.style.height = cssH + 'px';
+
+  const dpr = Math.min(window.devicePixelRatio || 1, MAX_DPR);
+  const back = Math.min(dpr, imgCanvas.width / cssW);   // never render above native
+  const bw = Math.max(1, Math.round(cssW * back));
+  const bh = Math.max(1, Math.round(cssH * back));
+  if(canvas.width !== bw || canvas.height !== bh){ canvas.width = bw; canvas.height = bh; }
+  updateMeta(bw, bh);
+}
+
+function updateMeta(bw, bh){
+  if(!imgCanvas){ metaEl.textContent = ''; return; }
+  metaEl.textContent =
+    'Source ' + imgCanvas.width + '×' + imgCanvas.height +
+    ' · preview ' + bw + '×' + bh +
+    ' · saves at full size' + (hdr ? '' : ' · 8-bit path');
+}
+
+if(window.ResizeObserver){
+  new ResizeObserver(() => { layout(); render(); }).observe(stage);
+}else{
+  window.addEventListener('resize', () => { layout(); render(); });
+}
+
 /* ---------------------------- loading ---------------------------- */
 
-function loadFile(file){
-  if(!file || !file.type.startsWith('image/')) return;
+function decode(file){
   const url = URL.createObjectURL(file);
-  const im = new Image();
-  im.onload = () => {
-    let {width:w, height:h} = im;
-    const scale = Math.min(1, MAX_SIDE / Math.max(w, h));
-    w = Math.round(w * scale); h = Math.round(h * scale);
+  return new Promise((res, rej) => {
+    const im = new Image();
+    im.onload  = () => { URL.revokeObjectURL(url); res(im); };
+    im.onerror = () => { URL.revokeObjectURL(url); rej(new Error('decode')); };
+    im.src = url;
+  });
+}
 
-    imgCanvas = document.createElement('canvas');
-    imgCanvas.width = w; imgCanvas.height = h;
-    imgCanvas.getContext('2d').drawImage(im, 0, 0, w, h);
-    img = im;
-    autoDepthCanvas = null;
+// A high-quality drawImage handles moderate reductions well on its own; only
+// step down in halves once the jump is big enough that a browser with a weaker
+// filter would start dropping the pixels it walks past.
+function fitToCanvas(src, w, h){
+  let cur = src, cw = src.width, ch = src.height;
+  while(cw >= w * 4 && ch >= h * 4 && cw > 2 && ch > 2){
+    const t = document.createElement('canvas');
+    t.width  = Math.max(1, Math.round(cw / 2));
+    t.height = Math.max(1, Math.round(ch / 2));
+    const x = t.getContext('2d');
+    x.imageSmoothingEnabled = true; x.imageSmoothingQuality = 'high';
+    x.drawImage(cur, 0, 0, t.width, t.height);
+    cur = t; cw = t.width; ch = t.height;
+  }
+  const out = document.createElement('canvas');
+  out.width = w; out.height = h;
+  const x = out.getContext('2d');
+  x.imageSmoothingEnabled = true; x.imageSmoothingQuality = 'high';
+  x.drawImage(cur, 0, 0, w, h);
+  return out;
+}
 
-    canvas.width = w; canvas.height = h;
-    gl.bindTexture(gl.TEXTURE_2D, texImg);
-    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, imgCanvas);
+async function loadFile(file){
+  if(!file || !file.type.startsWith('image/') || !gl) return;
+  let im;
+  try{ im = await decode(file); }
+  catch(e){
+    statusEl.textContent = 'That file would not open as an image.';
+    statusEl.className = 'warn';
+    return;
+  }
 
-    $('#drop').classList.add('hide');
-    $('#save').disabled = false;
-    focusPt = {x:0.5, y:0.5};
-    if(mode === 'auto') runAutoDepth(); else { rebuildDepth(); render(); }
-    URL.revokeObjectURL(url);
-  };
-  im.onerror = () => { statusEl.textContent = 'That file would not open as an image.'; statusEl.className = 'warn'; };
-  im.src = url;
+  const scale = Math.min(1, MAX_SIDE / Math.max(im.naturalWidth, im.naturalHeight));
+  const w = Math.max(1, Math.round(im.naturalWidth  * scale));
+  const h = Math.max(1, Math.round(im.naturalHeight * scale));
+
+  imgCanvas = scale < 1 ? fitToCanvas(im, w, h) : (() => {
+    const c = document.createElement('canvas');
+    c.width = w; c.height = h;
+    c.getContext('2d').drawImage(im, 0, 0);
+    return c;
+  })();
+  img = im;
+  autoDepthCanvas = null;
+
+  viewW = viewH = 0; viewCache = null; viewCacheW = viewCacheH = 0;
+
+  $('#drop').classList.add('hide');
+  $('#save').disabled = false;
+  focusPt = {x:0.5, y:0.5};
+  layout();
+  if(mode === 'auto') runAutoDepth(); else { rebuildDepth(); render(); }
 }
 
 /* ---------------------------- auto depth ---------------------------- */
@@ -530,7 +746,13 @@ async function runAutoDepth(){
   try{
     const pipe = await getPipeline();
     statusEl.textContent = 'Reading depth…';
-    const out = await pipe(imgCanvas.toDataURL('image/jpeg', 0.92));
+    // the model works at its own small resolution; feed it a clean downscale
+    // rather than a JPEG of the full-size picture
+    const s = Math.min(1, 1024 / Math.max(imgCanvas.width, imgCanvas.height));
+    const feed = s < 1
+      ? fitToCanvas(imgCanvas, Math.round(imgCanvas.width * s), Math.round(imgCanvas.height * s))
+      : imgCanvas;
+    const out = await pipe(feed.toDataURL('image/png'));
     const d = out.depth;
     const c = document.createElement('canvas');
     c.width = d.width; c.height = d.height;
@@ -603,30 +825,56 @@ $('#showdepth').addEventListener('click', e => {
   render();
 });
 
-const DEFAULTS = {focus:1, spread:0.42, aperture:22, edge:0.14, hthresh:0.72, hboost:3.2, ca:0.7, dist:0.02, vig:0.28, grain:0.04, lift:0.06};
+const DEFAULTS = {focus:1, spread:0.42, aperture:22, edge:0, hthresh:0.72, hboost:3.2, ca:0, dist:0, vig:0.16, grain:0.008, lift:0};
 $('#reset').addEventListener('click', () => {
   for(const k in DEFAULTS) $('#' + k).value = DEFAULTS[k];
   focusPt = {x:0.5, y:0.5};
   syncOutputs(); rebuildDepth(); render();
 });
 
-$('#save').addEventListener('click', () => {
-  if(showDepth){ showDepth = false; $('#showdepth').setAttribute('aria-pressed','false'); $('#showdepth').textContent='Show depth'; }
-  draw();
-  canvas.toBlob(b => {
+// Save re-renders the picture at its native size, at full sample count, so the
+// file is not a blown-up copy of the on-screen preview.
+function exportPNG(){
+  const bw = canvas.width, bh = canvas.height;
+  const w = imgCanvas.width, h = imgCanvas.height;
+  canvas.width = w; canvas.height = h;
+  drawScene(w, h, true);
+
+  const out = document.createElement('canvas');
+  out.width = w; out.height = h;
+  out.getContext('2d').drawImage(canvas, 0, 0);
+
+  canvas.width = bw; canvas.height = bh;
+  layout(); render();
+
+  out.toBlob(b => {
     const a = document.createElement('a');
     a.href = URL.createObjectURL(b);
     a.download = 'focal.png';
     a.click();
     setTimeout(() => URL.revokeObjectURL(a.href), 1000);
   }, 'image/png');
+}
+
+$('#save').addEventListener('click', () => {
+  if(!imgCanvas) return;
+  if(showDepth){
+    showDepth = false;
+    $('#showdepth').setAttribute('aria-pressed','false');
+    $('#showdepth').textContent='Show depth';
+  }
+  statusEl.className = '';
+  statusEl.textContent = 'Rendering at full size…';
+  requestAnimationFrame(() => {
+    exportPNG();
+    statusEl.textContent = 'Saved at ' + imgCanvas.width + '×' + imgCanvas.height + '.';
+  });
 });
 
 $('#pick').addEventListener('click', () => $('#file').click());
 $('#pick2').addEventListener('click', () => $('#file').click());
 $('#file').addEventListener('change', e => loadFile(e.target.files[0]));
 
-const stage = $('#stage');
 ['dragenter','dragover'].forEach(ev => stage.addEventListener(ev, e => { e.preventDefault(); stage.style.outline = '1px solid var(--coat-b)'; }));
 ['dragleave','drop'].forEach(ev => stage.addEventListener(ev, e => { e.preventDefault(); stage.style.outline = 'none'; }));
 stage.addEventListener('drop', e => loadFile(e.dataTransfer.files[0]));
